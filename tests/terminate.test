@@ -1,0 +1,30 @@
+# terminate on its own: the same process-tree kill ttlexec performs on expiry,
+# exposed for pipes the caller opened by hand.
+
+package require tcltest 2.5
+namespace import -force ::tcltest::*
+source [file join [file dirname [info script]] helpers.tcl]
+
+test terminate-1.1 {a process opened as a pipe is killed} -constraints unix -setup {
+	reap_probe 16180
+} -body {
+	set chan [open |[list sleep 16180] r]
+	set victim [pid $chan]
+	::exec_extensions::terminate $victim
+	catch {fconfigure $chan -blocking 0; close $chan}
+	after 200
+	catch {exec kill -0 $victim}
+} -cleanup {
+	reap_probe 16180
+} -result 1
+
+test terminate-2.1 {an empty pid list is accepted} -body {
+	::exec_extensions::terminate {}
+} -result {}
+
+test terminate-2.2 {the calling interpreter is never signalled} -body {
+	::exec_extensions::terminate [list [pid]]
+	expr {[pid] > 0}
+} -result 1
+
+cleanupTests

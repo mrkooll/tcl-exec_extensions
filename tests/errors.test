@@ -1,0 +1,36 @@
+# How a failing child is reported. The caller must be able to tell success from
+# failure, and must get the child's own words - the reason the package exists
+# is to run commands whose outcome matters, so a status that only reaches the
+# terminal is no use to anyone.
+
+package require tcltest 2.5
+namespace import -force ::tcltest::*
+source [file join [file dirname [info script]] helpers.tcl]
+
+test errors-1.1 {a non-zero exit status raises, with stderr and CHILDSTATUS} -body {
+	set rc [catch {::exec_extensions::ttlexec 2000 sh -c {echo out; echo boom >&2; exit 7}} msg opts]
+	list $rc [string match {*boom*} $msg] [lindex [dict get $opts -errorcode] 0]
+} -result {1 1 CHILDSTATUS}
+
+test errors-1.2 {output on stderr alone raises, as it does for exec} -body {
+	set rc [catch {::exec_extensions::ttlexec 2000 sh -c {echo warn >&2; exit 0}} msg]
+	list $rc [string match {*warn*} $msg]
+} -result {1 1}
+
+test errors-1.3 {exec agrees that stderr alone is an error} -body {
+	catch {exec sh -c {echo warn >&2; exit 0}}
+} -result 1
+
+test errors-2.1 {a command that cannot be started raises} -body {
+	catch {::exec_extensions::ttlexec 1000 no_such_binary_xyz}
+} -result 1
+
+test errors-3.1 {a missing command word is rejected} -body {
+	catch {::exec_extensions::ttlexec 100}
+} -result 1
+
+test errors-3.2 {a non-integer time to live is rejected} -body {
+	catch {::exec_extensions::ttlexec abc printf x}
+} -result 1
+
+cleanupTests

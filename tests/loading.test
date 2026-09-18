@@ -1,0 +1,27 @@
+# Loading the package: the index, the provide statement and the command names.
+
+package require tcltest 2.5
+namespace import -force ::tcltest::*
+source [file join [file dirname [info script]] helpers.tcl]
+
+test loading-1.1 {package require loads the version the index announces} -body {
+	package present exec_extensions
+} -result 1.1
+
+test loading-2.1 {ttlexec lives in the package namespace} -body {
+	llength [info commands ::exec_extensions::ttlexec]
+} -result 1
+
+test loading-2.2 {ttlexec is exported from the namespace} -body {
+	expr {"ttlexec" in [namespace eval ::exec_extensions {namespace export}]}
+} -result 1
+
+test loading-2.3 {the global ttlexec alias is kept for compatibility} -body {
+	llength [info commands ::ttlexec]
+} -result 1
+
+test loading-2.4 {terminate is a public command too} -body {
+	llength [info commands ::exec_extensions::terminate]
+} -result 1
+
+cleanupTests

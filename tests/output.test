@@ -1,0 +1,32 @@
+# What a successful call hands back: the child's standard output, verbatim but
+# for a single trailing newline, exactly as exec does it.
+
+package require tcltest 2.5
+namespace import -force ::tcltest::*
+source [file join [file dirname [info script]] helpers.tcl]
+
+test output-1.1 {standard output is returned} -body {
+	::exec_extensions::ttlexec 2000 printf "hello\n"
+} -result hello
+
+test output-1.2 {the global alias returns the same thing} -body {
+	::ttlexec 2000 printf "hello\n"
+} -result hello
+
+test output-2.1 {a blank line in the middle is kept} -body {
+	::exec_extensions::ttlexec 2000 printf "a\n\nb\n"
+} -result "a\n\nb"
+
+test output-2.2 {output that does not end in a newline is not truncated} -body {
+	::exec_extensions::ttlexec 2000 printf "a\nb"
+} -result "a\nb"
+
+test output-2.3 {exactly one trailing newline is stripped} -body {
+	::exec_extensions::ttlexec 2000 printf "a\n\n"
+} -result "a\n"
+
+test output-3.1 {stdout is identical to what exec returns} -body {
+	string equal [::exec_extensions::ttlexec 2000 printf "x\ny\n"] [exec printf "x\ny\n"]
+} -result 1
+
+cleanupTests

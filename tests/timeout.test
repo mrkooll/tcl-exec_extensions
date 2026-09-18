@@ -1,0 +1,58 @@
+# The time to live itself: the call must come back when the limit expires, and
+# nothing of the expired command may stay behind. A scheduled job that leaks
+# one process per timeout eventually takes the host down with it.
+#
+# Note the shape of the grandchild probe below. A shell replaces itself with
+# the last command of a -c script, so "sh -c {sleep N}" leaves no grandchild at
+# all and would test nothing; the trailing ":" keeps the shell alive as a real
+# parent.
+
+package require tcltest 2.5
+namespace import -force ::tcltest::*
+source [file join [file dirname [info script]] helpers.tcl]
+
+test timeout-1.1 {a command that outlives the limit raises PIPE ETIMEOUT} -setup {
+	reap_probe 27180
+} -body {
+	catch {::exec_extensions::ttlexec 500 sleep 27180} msg opts
+	lrange [dict get $opts -errorcode] 0 1
+} -cleanup {
+	reap_probe 27180
+} -result {PIPE ETIMEOUT}
+
+test timeout-1.2 {the call returns on the limit, not when the child would end} -setup {
+	reap_probe 27180
+} -body {
+	set started [clock milliseconds]
+	catch {::exec_extensions::ttlexec 500 sleep 27180}
+	set spent [expr {[clock milliseconds] - $started}]
+	expr {$spent >= 500 && $spent < 2500}
+} -cleanup {
+	reap_probe 27180
+} -result 1
+
+test timeout-2.1 {an expired child is terminated, not orphaned} -constraints unix -setup {
+	reap_probe 27180
+} -body {
+	catch {::exec_extensions::ttlexec 500 sleep 27180}
+	after 300
+	llength [probe_pids 27180]
+} -cleanup {
+	reap_probe 27180
+} -result 0
+
+test timeout-2.2 {the children of an expired wrapper are terminated too} -constraints unix -setup {
+	reap_probe 31410
+} -body {
+	catch {::exec_extensions::ttlexec 500 sh -c {sleep 31410; :}}
+	after 400
+	llength [probe_pids 31410]
+} -cleanup {
+	reap_probe 31410
+} -result 0
+
+test timeout-3.1 {a time to live of zero disables the limit} -body {
+	::exec_extensions::ttlexec 0 printf "z\n"
+} -result z
+
+cleanupTests

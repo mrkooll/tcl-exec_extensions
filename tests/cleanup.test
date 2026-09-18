@@ -1,0 +1,46 @@
+# Nothing accumulates across calls. ttlexec keeps per-call bookkeeping in an
+# array and redirects the child's stderr to a temporary file; a long-running
+# process that calls it every few minutes must not grow either of them.
+
+package require tcltest 2.5
+namespace import -force ::tcltest::*
+source [file join [file dirname [info script]] helpers.tcl]
+
+proc stderr_temp_files {} {
+	set tmp [file tempfile name]
+	close $tmp
+	file delete -- $name
+	return [glob -nocomplain [file join [file dirname $name] exec_extensions_stderr*]]
+}
+
+test cleanup-1.1 {a completed call leaves no state behind} -body {
+	::exec_extensions::ttlexec 1000 printf "q\n"
+	llength [array names ::exec_extensions::state]
+} -result 0
+
+test cleanup-1.2 {an expired call leaves no state behind} -setup {
+	reap_probe 27182
+} -body {
+	catch {::exec_extensions::ttlexec 300 sleep 27182}
+	llength [array names ::exec_extensions::state]
+} -cleanup {
+	reap_probe 27182
+} -result 0
+
+test cleanup-2.1 {the redirected stderr file is removed} -body {
+	# Compare against the files already there: a leftover from an earlier run
+	# must not decide this case, and deleting other people's temporary files
+	# to get a clean slate would be worse.
+	set before [stderr_temp_files]
+	::exec_extensions::ttlexec 1000 printf "q\n"
+	catch {::exec_extensions::ttlexec 1000 sh -c {echo noise >&2}}
+	set leaked [list]
+	foreach path [stderr_temp_files] {
+		if {$path ni $before} {
+			lappend leaked $path
+		}
+	}
+	llength $leaked
+} -result 0
+
+cleanupTests
