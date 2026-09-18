@@ -37,6 +37,23 @@ set out [ttlexec -ignorestderr 5000 curl -sS https://example.com]
 A negative time to live is still a time to live and not a bad switch: like zero,
 it disables the limit.
 
+### Redirections
+
+`ttlexec` redirects standard error for its own bookkeeping, so a redirection it
+appended would be the last one and would win. When the command already routes
+standard error - `2>`, `2>>`, `2>@`, `2>@1`, `>&`, `>>&` or `|&`, with the
+operator written separately or glued to the file name - nothing is appended and
+nothing is captured, and the text goes where the caller sent it:
+
+```tcl
+set out [ttlexec 5000 mycmd 2> /tmp/mycmd.log]   ;# stderr to the log, not an error
+set out [ttlexec 5000 mycmd 2>@1]                ;# stderr folded into the result
+```
+
+A redirected standard error never counts as a failure, the same as for `exec`; a
+non-zero exit status still does. Standard output cannot be redirected, because
+it is the pipe `ttlexec` reads.
+
 On expiry the error message leads with the limit rather than with standard
 error, because what stands at the top of that output is usually a shell
 reporting the job this package has just killed. The error code is
@@ -68,8 +85,8 @@ for the descendant walk. Without it only the direct children are signalled.
 ## Tests
 
 The suite uses `tcltest`, which ships with Tcl, and is grouped by theme in
-`tests/`: `loading`, `output`, `switches`, `errors`, `timeout`, `terminate`,
-`cleanup`.
+`tests/`: `loading`, `output`, `switches`, `redirect`, `errors`, `timeout`,
+`terminate`, `cleanup`.
 
 ```sh
 tclsh tests/all.tcl                    # everything

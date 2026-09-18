@@ -200,13 +200,35 @@ proc ::exec_extensions::_expire {token} {
 	return
 }
 
+# ::exec_extensions::_redirects_stderr -- does the command route stderr? (internal)
+#
+# exec accepts the redirection operator either as a word of its own or glued to
+# the file name, and several forms carry stderr: the 2> family, the >& forms
+# that send both streams to one place, and |& between pipeline stages. A word
+# that looks like one of those to us is one to exec as well, since exec reads
+# the argument list by the same rules.
+#
+# It matters because the redirection this package appends would be the last one
+# and would win, quietly overriding what the caller asked for.
+proc ::exec_extensions::_redirects_stderr {cmd} {
+	foreach word $cmd {
+		if {($word eq "|&") || [regexp {^(2>|>>&|>&)} $word]} {
+			return 1
+		}
+	}
+	return 0
+}
+
 # ttlexec -- execute external command with time limit
 # ttlexec ?switches? timeout command ?command_arg ?command_arg ...
 #
 # Execute external command like 'exec' but with a time limit. The command runs
-# in a pipeline whose stderr is captured, unless -ignorestderr lets it through,
-# and a nested event loop reads its output until it finishes or the limit
-# expires; an expired child is terminated rather than left running.
+# in a pipeline whose stderr is captured, unless -ignorestderr lets it through
+# or the command redirects stderr itself, in which case neither happens and the
+# caller's redirection stands. A nested event loop reads the output until the
+# command finishes or the limit expires; an expired child is terminated rather
+# than left running. Standard output cannot be redirected: it is the pipe being
+# read, and exec's own error says so.
 #
 # Arguments:
 # ?switches    - -keepnewline, -ignorestderr and -- , as exec takes them, and in
@@ -259,16 +281,21 @@ proc ::exec_extensions::ttlexec {args} {
 	set token [_token]
 	set errfile ""
 	set cmd [lrange $args 1 end]
-	# stderr has to be redirected either way. Left alone it is Tcl that captures
-	# it, and a pipeline that wrote to stderr then fails on close carrying that
-	# text - which is the very thing -ignorestderr asks us not to do. So send it
-	# to the interpreter's own stderr for that switch, the way exec passes it
-	# through, and to a file of our own otherwise, to report it as an error.
-	if {$ignorestderr} {
-		lappend cmd 2>@stderr
-	} else {
-		close [file tempfile errfile "exec_extensions_stderr"]
-		lappend cmd 2> $errfile
+	# Unless the caller has already said where stderr goes, it has to be
+	# redirected either way. Left alone it is Tcl that captures it, and a
+	# pipeline that wrote to stderr then fails on close carrying that text -
+	# which is the very thing -ignorestderr asks us not to do. So send it to the
+	# interpreter's own stderr for that switch, the way exec passes it through,
+	# and to a file of our own otherwise, to report it as an error. A caller's
+	# own redirection is left to do its job, and then there is nothing here to
+	# read or to report, exactly as exec has it.
+	if {![_redirects_stderr $cmd]} {
+		if {$ignorestderr} {
+			lappend cmd 2>@stderr
+		} else {
+			close [file tempfile errfile "exec_extensions_stderr"]
+			lappend cmd 2> $errfile
+		}
 	}
 	if {[catch {open |$cmd r} chan]} {
 		if {$errfile ne ""} {
