@@ -1,11 +1,16 @@
 # extended exec procedures
-# Copyright (c) 2019 Maksym Tiurin <mrkooll@bungarus.info>
+# Copyright (c) 2019-2026 Maksym Tiurin <mrkooll@bungarus.info>
 #
 # See the file "license.terms" for information on usage and redistribution
 # of this file, and for a DISCLAIMER OF ALL WARRANTIES.
 
+# "file tempfile", which ttlexec uses to capture stderr, arrived in 8.6. Saying
+# so here turns loading on an older interpreter into one clear refusal instead
+# of a puzzling error from the middle of a call.
+package require Tcl 8.6
+
 namespace eval ::exec_extensions {
-	variable version 1.1
+	variable version 2.0
 	# Milliseconds between SIGTERM and SIGKILL when a child outlives its limit.
 	variable kill_grace 200
 	# Milliseconds between checks for a child that stopped writing but has not
@@ -325,6 +330,7 @@ proc ::exec_extensions::ttlexec {args} {
 	}
 	set token [_token]
 	set errfile ""
+	set errchan ""
 	set cmd [lrange $args 1 end]
 	# Unless the caller has already said where stderr goes, it has to be
 	# redirected either way. Left alone it is Tcl that captures it, and a
@@ -338,12 +344,17 @@ proc ::exec_extensions::ttlexec {args} {
 		if {$ignorestderr} {
 			lappend cmd 2>@stderr
 		} else {
-			close [file tempfile errfile "exec_extensions_stderr"]
-			lappend cmd 2> $errfile
+			# The channel stays open and goes to the child as a descriptor. The
+			# file is then never looked up by name a second time, so nothing can
+			# take its place in between, and reading it back is a seek rather
+			# than another open.
+			set errchan [file tempfile errfile "exec_extensions_stderr"]
+			lappend cmd 2>@$errchan
 		}
 	}
 	if {[catch {open |$cmd r} chan]} {
-		if {$errfile ne ""} {
+		if {$errchan ne ""} {
+			catch {close $errchan}
 			catch {file delete -- $errfile}
 		}
 		return -code error -errorcode $::errorCode $chan
@@ -374,15 +385,17 @@ proc ::exec_extensions::ttlexec {args} {
 	# text is still waiting to be read and reported. Under -ignorestderr there
 	# is no file: the child wrote straight through and there is nothing to add.
 	set stderr_text ""
-	if {$errfile ne ""} {
+	if {$errchan ne ""} {
 		if {[catch {
-			set fh [open $errfile r]
-			set stderr_text [read $fh]
-			close $fh
-		} read_error]} {
+			seek $errchan 0
+			read $errchan
+		} stderr_text]} {
 			set stderr_text ""
 		}
+		catch {close $errchan}
 		catch {file delete -- $errfile}
+		# Every trailing newline goes, not the single one stdout loses: what is
+		# left is put into an error message, not handed back as a value.
 		set stderr_text [string trimright $stderr_text "\n"]
 	}
 	# exec strips exactly one trailing newline, no more. The stripped form is

@@ -54,6 +54,10 @@ A redirected standard error never counts as a failure, the same as for `exec`; a
 non-zero exit status still does. Standard output cannot be redirected, because
 it is the pipe `ttlexec` reads.
 
+Captured standard error loses **all** of its trailing newlines, not the single
+one standard output loses. It is only ever put into an error message, never
+handed back as a value, so the blank lines at the end of it would be noise.
+
 On expiry the error message leads with the limit rather than with standard
 error, because what stands at the top of that output is usually a shell
 reporting the job this package has just killed. The error code is
@@ -85,11 +89,37 @@ tells the two apart.
 
 ## Requirements
 
-Tcl 8.6, and a `ps` that understands `ps -Ao pid=,ppid=,lstart=` (Linux and
-macOS do) for the descendant walk and for telling a reused pid from the process
-that held it. Without such a `ps` only the pids handed to `terminate` are
-signalled, without that check, and `ttlexec` loses the liveness test that keeps
-its limit honest when a command closes its standard output and runs on.
+Tcl 8.6, which the package asks for itself and will refuse to load without:
+`file tempfile`, used to capture standard error, arrived in that release.
+
+Beyond Tcl, two external commands:
+
+* a `ps` that understands `ps -Ao pid=,ppid=,lstart=` and `ps -o stat= -p <pid>`
+  (Linux and macOS do), for the descendant walk, for telling a reused pid from
+  the process that held it, and for the liveness check described below;
+* a `kill` that takes `-TERM`, `-KILL` and a pid.
+
+### Windows
+
+The package is developed and tested on Unix. It is not tested on Windows, and
+from what the code does there, three things follow - none of which announce
+themselves, because every one of these calls is made inside a `catch`:
+
+* There is no `kill`, so `terminate` signals nothing at all. An expired command
+  is **not** stopped: its pipe is closed and the process keeps running. Over a
+  long-lived process that calls `ttlexec` on a schedule, one leaked process per
+  expiry adds up.
+* There is no `ps`, so no descendants are found and no pid is checked against
+  the process that held it - moot while nothing is signalled anyway.
+* Without `ps` the liveness check also answers "finished" for everything, and
+  the limit stops being enforced in one case: a command that closes or
+  redirects its own standard output and then keeps running is waited for until
+  it ends, however long that takes. Commands that hold their standard output
+  open - almost all of them - still expire on time.
+
+Making this work would mean `taskkill /T /F` in place of the signals and
+something other than `ps` for the process table. Patches welcome; guesses about
+an untested platform do not belong in the code.
 
 ## Tests
 
@@ -107,6 +137,31 @@ tclsh tests/all.tcl -verbose pbst      # show passing cases as well
 The runner exits non-zero when anything failed. Each file also runs on its own
 (`tclsh tests/timeout.test`). The cases that look for surviving processes are
 constrained to Unix, and read the process table with `ps`.
+
+## Changes in 2.0
+
+The version is a major one because two things changed under callers rather than
+beside them: `terminate` no longer sends the second signal unconditionally, and
+the package now refuses to load on an interpreter older than 8.6 instead of
+failing later on.
+
+* `ttlexec` takes `-keepnewline`, `-ignorestderr` and `--`, in the place and
+  with the meanings `exec` gives them.
+* An error raised by `ttlexec` now carries what the command printed, composed
+  the way `exec` composes one; the output used to be collected and dropped.
+* The limit is enforced against a command that closes its own standard output
+  and keeps running. Such a command used to be waited for to the end, with the
+  timer already cancelled and the notifier stopped by a blocking close.
+* On expiry the message leads with the limit, ahead of a shell's report of the
+  job this package has just killed.
+* A redirection of standard error written by the caller is left alone instead
+  of being overridden by the one `ttlexec` appends.
+* A read that fails ends the call with that error, rather than reaching the
+  background handler and leaving the wait with nothing to wake it.
+* `SIGKILL` reaches only processes that are still the ones `SIGTERM` went to; a
+  pid freed during the grace period can already belong to somebody else.
+* Captured standard error goes through an open descriptor, so the temporary
+  file is never reopened by name.
 
 ## Changes in 1.1
 
