@@ -8,6 +8,9 @@ namespace eval ::exec_extensions {
 	variable version 1.1
 	# Milliseconds between SIGTERM and SIGKILL when a child outlives its limit.
 	variable kill_grace 200
+	# Milliseconds between checks for a child that stopped writing but has not
+	# exited yet. Only the pathological case waits at all - see _finish.
+	variable poll_interval 50
 	# Serial number feeding the per-call state key.
 	variable serial 0
 	# Per-call state, keyed "<token>,<field>".
@@ -130,14 +133,45 @@ proc ::exec_extensions::_collect {token} {
 	return
 }
 
+# ::exec_extensions::_alive -- is any of these processes still running? (internal)
+#
+# A process that exited but has not been reaped yet is a zombie, and a zombie
+# still answers "kill -0", so liveness has to come from the process state rather
+# than from a signal. A process table we cannot read reports everything as
+# finished, which is what the caller got before this check existed.
+proc ::exec_extensions::_alive {pids} {
+	foreach pid $pids {
+		if {[catch {exec ps -o stat= -p $pid} stat]} {
+			continue
+		}
+		set stat [string trim $stat]
+		if {($stat ne "") && ([string index $stat 0] ne "Z")} {
+			return 1
+		}
+	}
+	return 0
+}
+
 # ::exec_extensions::_finish -- the child closed its output: reap it (internal)
 proc ::exec_extensions::_finish {token} {
 	variable state
 	set chan $state($token,chan)
-	after cancel $state($token,timer)
 	catch {fileevent $chan readable {}}
-	# End of file means the child is done writing, so a blocking close cannot
-	# hang here - and only a blocking close reports the exit status.
+	# End of file only means that nobody holds the write end of the pipe any
+	# more: a child that closed or redirected its own stdout keeps running. Only
+	# a blocking close reports the exit status, but it also stops the notifier,
+	# so an armed timer cannot fire while it waits and the limit would go
+	# unenforced. Wait for the child here instead, inside the event loop where
+	# _expire can still step in, and hold the timer until the close is done
+	# rather than cancelling it up front. No timer means no limit to enforce, so
+	# there the close may wait and the process table need not be read at all.
+	if {($state($token,timer) ne "") && [_alive $state($token,pids)]} {
+		variable poll_interval
+		set state($token,poll) [after $poll_interval \
+		  [list ::exec_extensions::_finish $token]]
+		return
+	}
+	after cancel $state($token,timer)
 	catch {fconfigure $chan -blocking 1}
 	if {[catch {close $chan} msg]} {
 		set state($token,error) $msg
@@ -151,6 +185,7 @@ proc ::exec_extensions::_finish {token} {
 proc ::exec_extensions::_expire {token} {
 	variable state
 	set chan $state($token,chan)
+	after cancel $state($token,poll)
 	catch {fileevent $chan readable {}}
 	# Kill before closing: a non-blocking close returns without waiting for the
 	# child, so closing alone would leave it running with nobody reading it.
@@ -211,6 +246,7 @@ proc ::exec_extensions::ttlexec {args} {
 	  $token,error "" \
 	  $token,errorcode {} \
 	  $token,timer "" \
+	  $token,poll "" \
 	  $token,done 0]
 	fconfigure $chan -blocking 0
 	if {$timeout > 0} {

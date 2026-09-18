@@ -51,6 +51,23 @@ test timeout-2.2 {the children of an expired wrapper are terminated too} -constr
 	reap_probe 31410
 } -result 0
 
+test timeout-2.3 {a child that closed its own stdout is still cut off} -constraints unix -setup {
+	reap_probe 24310
+} -body {
+	# End of file arrives at once here because the child closed the write end of
+	# the pipe, while the child itself runs on. Reaping it with a blocking close
+	# at that point would stop the notifier and let it run to completion.
+	set started [clock milliseconds]
+	catch {::exec_extensions::ttlexec 500 sh -c {exec 1>&-; sleep 24310}} msg opts
+	set spent [expr {[clock milliseconds] - $started}]
+	after 300
+	list [expr {$spent < 2500}] \
+	  [lrange [dict get $opts -errorcode] 0 1] \
+	  [llength [probe_pids 24310]]
+} -cleanup {
+	reap_probe 24310
+} -result {1 {PIPE ETIMEOUT} 0}
+
 test timeout-3.1 {a time to live of zero disables the limit} -body {
 	::exec_extensions::ttlexec 0 printf "z\n"
 } -result z
