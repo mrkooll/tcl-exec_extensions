@@ -18,6 +18,92 @@ test terminate-1.1 {a process opened as a pipe is killed} -constraints unix -set
 	reap_probe 16180
 } -result 1
 
+test terminate-1.2 {a process that ignores SIGTERM is still killed} -constraints unix -setup {
+	reap_probe 17110
+} -body {
+	# The second signal now goes only to a pid that is still the same process,
+	# so this is what proves the check lets the ordinary case through: nothing
+	# here dies until SIGKILL arrives. An ignored disposition survives exec, so
+	# it holds whether or not the shell replaces itself with sleep.
+	set chan [open |[list sh -c {trap "" TERM; sleep 17110}] r]
+	# Let the shell reach its sleep: a subtree is walked as it stands when
+	# terminate is called, and one not yet started cannot be in it.
+	after 400
+	::exec_extensions::terminate [pid $chan]
+	catch {fconfigure $chan -blocking 0; close $chan}
+	after 300
+	llength [probe_pids 17110]
+} -cleanup {
+	reap_probe 17110
+} -result 0
+
+test terminate-1.3 {a pid freed during the wait is not signalled again} -constraints unix -setup {
+	reap_probe 17121
+} -body {
+	# The grandchild dies on SIGTERM and init reaps it at once, so its pid is
+	# free before the grace period is over - that is the pid that must not be
+	# signalled a second time. The direct child is a different matter: it stays
+	# in the table as a zombie of ours until it is reaped, its pid cannot be
+	# handed to anybody else, and SIGKILL for it is harmless.
+	#
+	# Runs apart because it replaces exec to see which signals go out.
+	in_child {
+		set ::sent [list]
+		rename exec _real_exec
+		proc exec {args} {
+			if {[lindex $args 0] eq "kill"} {
+				lappend ::sent [list [lindex $args 1] [lindex $args 2]]
+			}
+			return [_real_exec {*}$args]
+		}
+		set chan [open |[list sh -c {sleep 17121; :}] r]
+		set child [pid $chan]
+		after 400
+		set grandchild ""
+		catch {_real_exec ps -Ao pid=,ppid=} listing
+		foreach line [split $listing "\n"] {
+			lassign [regexp -all -inline {\S+} $line] p pp
+			if {$pp eq $child} {
+				set grandchild $p
+			}
+		}
+		::exec_extensions::terminate $child 400
+		catch {fconfigure $chan -blocking 0; close $chan}
+		set hit_grandchild 0
+		set hit_child 0
+		foreach pair $::sent {
+			lassign $pair signal p
+			if {$signal ne "-KILL"} {
+				continue
+			}
+			if {$p eq $grandchild} {
+				set hit_grandchild 1
+			}
+			if {$p eq $child} {
+				set hit_child 1
+			}
+		}
+		puts [list $hit_grandchild $hit_child]
+	}
+} -cleanup {
+	reap_probe 17121
+} -result {0 1}
+
+test terminate-3.1 {the process table carries a start time for this process} -constraints unix -body {
+	set table [::exec_extensions::_process_table]
+	set entry [dict get $table [pid]]
+	# {ppid start}, and the start is a date with spaces that must survive the
+	# split into fields.
+	list [expr {[lindex $entry 0] > 0}] [expr {[llength [lindex $entry 1]] > 1}]
+} -result {1 1}
+
+test terminate-3.2 {a start time does not drift between two readings} -constraints unix -body {
+	set first [dict get [::exec_extensions::_process_table] [pid]]
+	after 1100
+	set second [dict get [::exec_extensions::_process_table] [pid]]
+	string equal [lindex $first 1] [lindex $second 1]
+} -result 1
+
 test terminate-2.1 {an empty pid list is accepted} -body {
 	::exec_extensions::terminate {}
 } -result {}

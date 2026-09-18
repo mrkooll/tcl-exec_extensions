@@ -32,24 +32,39 @@ proc ::exec_extensions::_token {} {
 	return "[pid]_[incr serial]"
 }
 
+# ::exec_extensions::_process_table -- every process as pid -> {ppid start} (internal)
+#
+# The start time is what tells one process from another once a pid is reused:
+# pids come round again, but the process holding a recycled one started later.
+# A process table we cannot read gives an empty one, and the callers fall back
+# on what they were told.
+proc ::exec_extensions::_process_table {} {
+	set table [dict create]
+	if {[catch {exec ps -Ao pid=,ppid=,lstart=} listing]} {
+		return $table
+	}
+	foreach line [split $listing "\n"] {
+		set fields [regexp -all -inline {\S+} $line]
+		if {[llength $fields] < 3} {
+			continue
+		}
+		# lstart is a date with spaces in it, so it is all that is left.
+		dict set table [lindex $fields 0] \
+		  [list [lindex $fields 1] [lrange $fields 2 end]]
+	}
+	return $table
+}
+
 # ::exec_extensions::_descendants -- pids plus everything below them (internal)
 #
 # Killing a pipeline's own processes is not enough when one of them is a shell:
 # its children are re-parented to init and keep running. Walk the process table
-# downwards so the whole subtree can be signalled. A process table we cannot
-# read leaves the caller with the pids it already had.
-proc ::exec_extensions::_descendants {pids} {
-	if {[catch {exec ps -Ao pid=,ppid=} listing]} {
-		return $pids
-	}
+# downwards so the whole subtree can be signalled. An empty table leaves the
+# caller with the pids it already had.
+proc ::exec_extensions::_descendants {pids table} {
 	set children [dict create]
-	foreach line [split $listing "\n"] {
-		set fields [regexp -all -inline {\S+} $line]
-		if {[llength $fields] < 2} {
-			continue
-		}
-		lassign $fields pid ppid
-		dict lappend children $ppid $pid
+	dict for {pid info} $table {
+		dict lappend children [lindex $info 0] $pid
 	}
 	set all $pids
 	set queue $pids
@@ -75,10 +90,12 @@ proc ::exec_extensions::_descendants {pids} {
 # terminate pids ?grace?
 #
 # Send SIGTERM to every pid and to every process descended from it, wait grace
-# milliseconds, then send SIGKILL to the same set. Signalling a process that
-# already exited is a harmless no-op, and the exec calls themselves make Tcl
-# reap its detached children. This process is never signalled, so a caller that
-# passes its own pid by accident cannot kill the interpreter.
+# milliseconds, then send SIGKILL to those of them that are still the same
+# processes - a pid freed during the wait can already belong to somebody else,
+# and only the start time tells the two apart. Signalling a process that already
+# exited is a harmless no-op, and the exec calls themselves make Tcl reap its
+# detached children. This process is never signalled, so a caller that passes
+# its own pid by accident cannot kill the interpreter.
 #
 # Arguments:
 # pids   - list of process IDs
@@ -97,8 +114,9 @@ proc ::exec_extensions::terminate {pids {grace ""}} {
 		variable kill_grace
 		set grace $kill_grace
 	}
+	set table [_process_table]
 	set targets [list]
-	foreach pid [_descendants $pids] {
+	foreach pid [_descendants $pids $table] {
 		if {($pid != [pid]) && ($pid > 1)} {
 			lappend targets $pid
 		}
@@ -115,7 +133,23 @@ proc ::exec_extensions::terminate {pids {grace ""}} {
 	if {$grace > 0} {
 		after $grace
 	}
+	# A descendant is no child of ours, so init reaps it the moment it goes and
+	# its pid is free to come round again inside the grace period just waited
+	# out. Signalling it then would hit a stranger, so a pid is only killed
+	# while it still carries the start time it had before the first signal.
+	# Without a table there is nothing to check against, and the targets are
+	# then just the pids the caller named.
+	set now [_process_table]
+	set verifiable [expr {[dict size $table] && [dict size $now]}]
 	foreach pid $targets {
+		if {$verifiable} {
+			if {![dict exists $now $pid] || ![dict exists $table $pid]} {
+				continue
+			}
+			if {[lindex [dict get $now $pid] 1] ne [lindex [dict get $table $pid] 1]} {
+				continue
+			}
+		}
 		catch {exec kill -KILL $pid}
 	}
 	return

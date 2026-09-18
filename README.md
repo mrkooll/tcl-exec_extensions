@@ -77,10 +77,19 @@ Terminates the given process ids and all of their descendants, deepest first,
 with the same `SIGTERM` then `SIGKILL` sequence `ttlexec` uses on expiry.
 Useful for cleaning up pipes opened directly with `open |...`.
 
+`SIGKILL` goes only to those processes that are still the same ones that were
+sent `SIGTERM`. A descendant is nobody's child of the calling process, so the
+system reaps it the moment it dies and its pid can be handed to somebody else
+within the grace period; the start time read before the first signal is what
+tells the two apart.
+
 ## Requirements
 
-Tcl 8.6, and a `ps` that understands `ps -Ao pid=,ppid=` (Linux and macOS do)
-for the descendant walk. Without it only the direct children are signalled.
+Tcl 8.6, and a `ps` that understands `ps -Ao pid=,ppid=,lstart=` (Linux and
+macOS do) for the descendant walk and for telling a reused pid from the process
+that held it. Without such a `ps` only the pids handed to `terminate` are
+signalled, without that check, and `ttlexec` loses the liveness test that keeps
+its limit honest when a command closes its standard output and runs on.
 
 ## Tests
 
