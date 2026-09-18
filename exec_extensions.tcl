@@ -201,14 +201,16 @@ proc ::exec_extensions::_expire {token} {
 }
 
 # ttlexec -- execute external command with time limit
-# ttlexec timeout command ?command_arg ?command_arg ...
+# ttlexec ?switches? timeout command ?command_arg ?command_arg ...
 #
 # Execute external command like 'exec' but with a time limit. The command runs
-# in a pipeline whose stderr is captured, and a nested event loop reads its
-# output until it finishes or the limit expires; an expired child is terminated
-# rather than left running.
+# in a pipeline whose stderr is captured, unless -ignorestderr lets it through,
+# and a nested event loop reads its output until it finishes or the limit
+# expires; an expired child is terminated rather than left running.
 #
 # Arguments:
+# ?switches    - -keepnewline, -ignorestderr and -- , as exec takes them, and in
+#                the same place: before everything else
 # timeout      - execution limit in milliseconds (0 or less disables the limit)
 # command      - command to execute
 # ?command_arg - command arguments (can be many)
@@ -218,24 +220,60 @@ proc ::exec_extensions::_expire {token} {
 # invoke it from a handler that is itself inside a vwait on the same variable.
 #
 # Results:
-# The command's standard output with one trailing newline removed, as exec does.
-# Raises an error, again as exec does, when the command cannot be started, wrote
-# to stderr, exited non-zero, or ran past the limit. The error code is
-# {PIPE ETIMEOUT <message>} in the timeout case.
+# The command's standard output with one trailing newline removed, or with it
+# kept under -keepnewline, as exec does. Raises an error, again as exec does,
+# when the command cannot be started, wrote to stderr, exited non-zero, or ran
+# past the limit. The error code is {PIPE ETIMEOUT <message>} in the timeout
+# case.
 proc ::exec_extensions::ttlexec {args} {
 	variable state
+	set keepnewline 0
+	set ignorestderr 0
+	# Switches come first, where exec has them. An integer ends the scan before
+	# the switch table sees it, so that a negative time to live still reads as
+	# one instead of as a bad switch.
+	while {[llength $args]} {
+		set opt [lindex $args 0]
+		if {([string index $opt 0] ne "-") || [string is integer -strict $opt]} {
+			break
+		}
+		set args [lrange $args 1 end]
+		if {$opt eq "--"} {
+			break
+		}
+		switch -exact -- $opt {
+			-keepnewline {set keepnewline 1}
+			-ignorestderr {set ignorestderr 1}
+			default {
+				return -code error \
+				  -errorcode [list TCL LOOKUP INDEX option $opt] \
+				  "bad option \"$opt\": must be -ignorestderr, -keepnewline, or --"
+			}
+		}
+	}
 	set timeout [lindex $args 0]
 	if {([llength $args] < 2) || ![string is integer -strict $timeout]} {
 		return -code error -errorcode [list TCL WRONGARGS] \
-		  "wrong # args: should be \"ttlexec timeout command ?command_args?\""
+		  "wrong # args: should be \"ttlexec ?switches? timeout command ?command_args?\""
 	}
 	set token [_token]
 	set errfile ""
-	close [file tempfile errfile "exec_extensions_stderr"]
 	set cmd [lrange $args 1 end]
-	lappend cmd 2> $errfile
+	# stderr has to be redirected either way. Left alone it is Tcl that captures
+	# it, and a pipeline that wrote to stderr then fails on close carrying that
+	# text - which is the very thing -ignorestderr asks us not to do. So send it
+	# to the interpreter's own stderr for that switch, the way exec passes it
+	# through, and to a file of our own otherwise, to report it as an error.
+	if {$ignorestderr} {
+		lappend cmd 2>@stderr
+	} else {
+		close [file tempfile errfile "exec_extensions_stderr"]
+		lappend cmd 2> $errfile
+	}
 	if {[catch {open |$cmd r} chan]} {
-		catch {file delete -- $errfile}
+		if {$errfile ne ""} {
+			catch {file delete -- $errfile}
+		}
 		return -code error -errorcode $::errorCode $chan
 	}
 	array set state [list \
@@ -260,43 +298,56 @@ proc ::exec_extensions::ttlexec {args} {
 	set message $state($token,error)
 	set code $state($token,errorcode)
 	array unset state "$token,*"
-	# stderr was redirected, so close() stayed quiet about it; report it the way
-	# exec does - as an error carrying the child's own words.
+	# Where stderr went to a file of ours, close() stayed quiet about it and the
+	# text is still waiting to be read and reported. Under -ignorestderr there
+	# is no file: the child wrote straight through and there is nothing to add.
 	set stderr_text ""
-	if {[catch {
-		set fh [open $errfile r]
-		set stderr_text [read $fh]
-		close $fh
-	} read_error]} {
-		set stderr_text ""
-	}
-	catch {file delete -- $errfile}
-	set stderr_text [string trimright $stderr_text "\n"]
-	if {($message ne "") && ($stderr_text ne "")} {
-		# exec leads with the child's own words and ends with its status line.
-		# The timeout case is the other way round: the limit is the reason, and
-		# the stderr under it starts with a shell announcing the job this
-		# package has just killed - noise of our own making, which must not
-		# stand where the reason belongs.
-		if {[lrange $code 0 1] eq {PIPE ETIMEOUT}} {
-			append message "\n" $stderr_text
-		} else {
-			set message "$stderr_text\n$message"
+	if {$errfile ne ""} {
+		if {[catch {
+			set fh [open $errfile r]
+			set stderr_text [read $fh]
+			close $fh
+		} read_error]} {
+			set stderr_text ""
 		}
-	} elseif {$stderr_text ne ""} {
-		set message $stderr_text
+		catch {file delete -- $errfile}
+		set stderr_text [string trimright $stderr_text "\n"]
 	}
-	if {$message ne ""} {
-		if {$code eq {}} {
-			set code NONE
+	# exec strips exactly one trailing newline, no more. The stripped form is
+	# what goes into an error message either way, since the parts of that
+	# message are joined with a newline of their own.
+	set trimmed $result
+	if {[string index $trimmed end] eq "\n"} {
+		set trimmed [string range $trimmed 0 end-1]
+	}
+	if {($message eq "") && ($stderr_text eq "")} {
+		if {$keepnewline} {
+			return $result
 		}
-		return -code error -errorcode $code $message
+		return $trimmed
 	}
-	# exec strips exactly one trailing newline, no more.
-	if {[string index $result end] eq "\n"} {
-		set result [string range $result 0 end-1]
+	# An error message is what the child said - its output first, then its
+	# stderr - and falls back to the status line only when it said nothing on
+	# stderr, which is how exec composes one. The expired case leads with the
+	# limit instead: it is the reason, and the stderr under it starts with a
+	# shell announcing the job this package has just killed.
+	set expired [expr {[lrange $code 0 1] eq {PIPE ETIMEOUT}}]
+	set parts [list]
+	if {$expired} {
+		lappend parts $message
 	}
-	return $result
+	if {$trimmed ne ""} {
+		lappend parts $trimmed
+	}
+	if {$stderr_text ne ""} {
+		lappend parts $stderr_text
+	} elseif {!$expired && ($message ne "")} {
+		lappend parts $message
+	}
+	if {$code eq {}} {
+		set code NONE
+	}
+	return -code error -errorcode $code [join $parts "\n"]
 }
 
 # Keep the pre-1.1 spelling working: the command used to live in the global

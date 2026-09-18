@@ -43,6 +43,18 @@ test timeout-1.3 {the limit leads the message, not the kill enforcing it} -setup
 	reap_probe 29450
 } -result 1
 
+test timeout-1.4 {what the command managed to print survives the limit} -setup {
+	reap_probe 29480
+} -body {
+	# "exec sleep" rather than "sleep": the shell replaces itself with it and so
+	# is not left behind to report the killed job on stderr. The case is about
+	# the output surviving, and nothing else belongs in the message.
+	catch {::exec_extensions::ttlexec 500 sh -c {echo PARTIAL; exec sleep 29480}} msg
+	string match {*PARTIAL*} $msg
+} -cleanup {
+	reap_probe 29480
+} -result 1
+
 test timeout-2.1 {an expired child is terminated, not orphaned} -constraints unix -setup {
 	reap_probe 27180
 } -body {

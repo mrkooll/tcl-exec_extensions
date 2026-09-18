@@ -1,0 +1,115 @@
+# The exec switches ttlexec understands. Most cases ask exec the same question
+# and compare the two answers: hardcoding an expected string would only record
+# what this package does today, not whether it still agrees with the command it
+# stands in for.
+
+package require tcltest 2.5
+namespace import -force ::tcltest::*
+source [file join [file dirname [info script]] helpers.tcl]
+
+# Run a body under both commands and return the two outcomes for comparison.
+# The pid inside a CHILDSTATUS error code differs between the two runs by
+# definition, so it is masked out.
+proc both {switches args} {
+	set out [list]
+	foreach prefix [list [list exec {*}$switches] \
+	                     [list ::exec_extensions::ttlexec {*}$switches 5000]] {
+		set rc [catch {{*}$prefix {*}$args} msg opts]
+		set code {}
+		catch {set code [dict get $opts -errorcode]}
+		if {[lindex $code 0] eq "CHILDSTATUS"} {
+			set code [list CHILDSTATUS PID [lindex $code 2]]
+		}
+		lappend out [list $rc $msg $code]
+	}
+	return $out
+}
+proc agree {switches args} {
+	lassign [both $switches {*}$args] a b
+	if {$a eq $b} {
+		return 1
+	}
+	return "exec: $a\nttlexec: $b"
+}
+
+# What -ignorestderr does with the command's stderr is let it through to the
+# interpreter's own stderr. That is the behaviour under test, and it is also
+# exactly what tcltest counts as a test file error, so those cases run in a
+# child interpreter whose stderr is dropped. The child prints its verdict.
+proc passthrough {script} {
+	set boot "lappend auto_path [list [file dirname $::helpers::dir]]\n"
+	append boot "package require exec_extensions\n"
+	return [exec [info nameofexecutable] << $boot$script 2> /dev/null]
+}
+
+test switches-1.1 {-keepnewline retains the trailing newline} -body {
+	::exec_extensions::ttlexec -keepnewline 2000 printf "a\n"
+} -result "a\n"
+
+test switches-1.2 {-keepnewline retains only what is there} -body {
+	::exec_extensions::ttlexec -keepnewline 2000 printf "a"
+} -result a
+
+test switches-1.3 {-keepnewline agrees with exec, newline and none} -body {
+	list [agree -keepnewline printf "a\n\n"] [agree -keepnewline printf "a"]
+} -result {1 1}
+
+test switches-1.4 {-keepnewline does not disturb a failing command} -body {
+	agree -keepnewline sh -c {echo out; exit 7}
+} -result 1
+
+test switches-2.1 {-ignorestderr makes stderr alone harmless} -constraints unix -body {
+	passthrough {puts [::exec_extensions::ttlexec -ignorestderr 2000 sh -c {echo warn >&2; echo out}]}
+} -result out
+
+test switches-2.2 {-ignorestderr still reports a non-zero exit} -constraints unix -body {
+	passthrough {
+		set rc [catch {
+			::exec_extensions::ttlexec -ignorestderr 2000 sh -c {echo out; echo warn >&2; exit 7}
+		} msg opts]
+		puts [list $rc [string match {*warn*} $msg] [lindex [dict get $opts -errorcode] 0]]
+	}
+} -result {1 0 CHILDSTATUS}
+
+test switches-2.3 {-ignorestderr agrees with exec} -constraints unix -body {
+	passthrough {
+		set verdict [list]
+		foreach cmd [list {sh -c {echo out; echo warn >&2}} \
+		                  {sh -c {echo out; echo warn >&2; exit 7}}] {
+			set a [list [catch {exec -ignorestderr {*}$cmd} m] $m]
+			set b [list [catch {::exec_extensions::ttlexec -ignorestderr 2000 {*}$cmd} m] $m]
+			lappend verdict [string equal $a $b]
+		}
+		puts $verdict
+	}
+} -result {1 1}
+
+test switches-3.1 {both switches at once agree with exec} -constraints unix -body {
+	passthrough {
+		set cmd {sh -c {echo out; echo warn >&2}}
+		set a [list [catch {exec -keepnewline -ignorestderr {*}$cmd} m] $m]
+		set b [list [catch {::exec_extensions::ttlexec -keepnewline -ignorestderr 2000 {*}$cmd} m] $m]
+		puts [string equal $a $b]
+	}
+} -result 1
+
+test switches-4.1 {-- ends the switches} -body {
+	::exec_extensions::ttlexec -- 2000 printf "a\n"
+} -result a
+
+test switches-4.2 {an unknown switch is rejected, as exec rejects one} -body {
+	set rc [catch {::exec_extensions::ttlexec -nosuchswitch 2000 printf a} msg opts]
+	list $rc [string match {bad option*} $msg] [lrange [dict get $opts -errorcode] 0 2]
+} -result {1 1 {TCL LOOKUP INDEX}}
+
+test switches-4.3 {a negative time to live is a limit, not a bad switch} -body {
+	# It disables the limit, the same as zero, and must not be eaten by the
+	# switch scan just because it starts with a minus.
+	::exec_extensions::ttlexec -500 printf "a\n"
+} -result a
+
+test switches-4.4 {switches without a command are still wrong # args} -body {
+	catch {::exec_extensions::ttlexec -keepnewline}
+} -result 1
+
+cleanupTests

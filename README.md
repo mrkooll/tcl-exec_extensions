@@ -10,12 +10,37 @@ package require exec_extensions
 set out [ttlexec 5000 aws ssm send-command --instance-ids i-123]
 ```
 
-`ttlexec ms args...` runs `args` like `exec` does, but gives it at most `ms`
-milliseconds. It returns the command's standard output with a single trailing
-newline stripped, and raises an error when the command cannot be started,
-writes to standard error, exits with a non-zero status, or outlives the limit.
+`ttlexec ?switches? ms args...` runs `args` like `exec` does, but gives it at
+most `ms` milliseconds. It returns the command's standard output with a single
+trailing newline stripped, and raises an error when the command cannot be
+started, writes to standard error, exits with a non-zero status, or outlives the
+limit. The error carries what the command said, composed the way `exec` composes
+it: the output first, then standard error, and `child process exited abnormally`
+only when standard error was silent.
 
-On expiry the error code is `PIPE ETIMEOUT <message>`, and the child process
+### Switches
+
+The switches `exec` takes, with the same meanings, in the same place - before
+everything else:
+
+```tcl
+set out [ttlexec -keepnewline 5000 git log -1 --format=%H]
+set out [ttlexec -ignorestderr 5000 curl -sS https://example.com]
+```
+
+* `-keepnewline` keeps the trailing newline instead of stripping it.
+* `-ignorestderr` stops output on standard error from counting as a failure; it
+  is passed through to the interpreter's own standard error rather than
+  captured, again as `exec` does.
+* `--` ends the switches, for a command whose name starts with a minus.
+
+A negative time to live is still a time to live and not a bad switch: like zero,
+it disables the limit.
+
+On expiry the error message leads with the limit rather than with standard
+error, because what stands at the top of that output is usually a shell
+reporting the job this package has just killed. The error code is
+`PIPE ETIMEOUT <message>`, and the child process
 together with every descendant it left behind is terminated (`SIGTERM`, then
 `SIGKILL` after `$::exec_extensions::kill_grace` milliseconds).
 
@@ -43,7 +68,8 @@ for the descendant walk. Without it only the direct children are signalled.
 ## Tests
 
 The suite uses `tcltest`, which ships with Tcl, and is grouped by theme in
-`tests/`: `loading`, `output`, `errors`, `timeout`, `terminate`, `cleanup`.
+`tests/`: `loading`, `output`, `switches`, `errors`, `timeout`, `terminate`,
+`cleanup`.
 
 ```sh
 tclsh tests/all.tcl                    # everything

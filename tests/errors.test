@@ -21,6 +21,20 @@ test errors-1.3 {exec agrees that stderr alone is an error} -body {
 	catch {exec sh -c {echo warn >&2; exit 0}}
 } -result 1
 
+test errors-1.4 {what the command printed before failing reaches the caller} -body {
+	# exec puts the command's own output in the error it raises. Dropping it
+	# leaves the caller diagnosing a failure with the evidence thrown away.
+	set rc [catch {::exec_extensions::ttlexec 2000 sh -c {echo OUT; exit 7}} msg]
+	list $rc $msg
+} -result "1 {OUT\nchild process exited abnormally}"
+
+test errors-1.5 {the error is assembled the way exec assembles it} -body {
+	set cmd {sh -c {echo OUT; echo ERR >&2; exit 7}}
+	catch {exec {*}$cmd} expected
+	catch {::exec_extensions::ttlexec 2000 {*}$cmd} actual
+	string equal $expected $actual
+} -result 1
+
 test errors-2.1 {a command that cannot be started raises} -body {
 	catch {::exec_extensions::ttlexec 1000 no_such_binary_xyz}
 } -result 1
