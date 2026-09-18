@@ -47,4 +47,52 @@ test errors-3.2 {a non-integer time to live is rejected} -body {
 	catch {::exec_extensions::ttlexec abc printf x}
 } -result 1
 
+# A channel that breaks mid-read cannot be arranged on demand, so a transform
+# raising from its read method stands in for one. The time to live is disabled
+# in both cases below, which leaves nothing but the handling of that failure to
+# end the call: an error escaping a file event goes to the background handler,
+# and the vwait inside ttlexec would then wait for a wake-up nothing is left to
+# give it. The watchdog reports a hang instead of letting the suite stall on one.
+set ::breaking_call {
+	proc breaker {cmd handle args} {
+		switch -- $cmd {
+			initialize {return {initialize finalize read}}
+			finalize   {return}
+			read       {error "broken channel"}
+		}
+	}
+	proc stderr_temp_files {} {
+		set name ""
+		close [file tempfile name]
+		file delete -- $name
+		return [glob -nocomplain \
+		  [file join [file dirname $name] exec_extensions_stderr*]]
+	}
+	after 100 {
+		foreach k [array names ::exec_extensions::state *,chan] {
+			catch {chan push $::exec_extensions::state($k) breaker}
+		}
+	}
+	after 5000 {puts hung; exit 0}
+	set before [stderr_temp_files]
+	set rc [catch {::exec_extensions::ttlexec 0 sh -c {sleep 1; echo hi}} msg]
+}
+
+test errors-4.1 {a failing read ends the call instead of hanging} -constraints unix -body {
+	in_child "$::breaking_call\nputs \[list \$rc \$msg]"
+} -result {1 {broken channel}}
+
+test errors-4.2 {a failing read leaves nothing behind} -constraints unix -body {
+	# Files another run left in the temporary directory must not decide this,
+	# so only what this call added is counted.
+	in_child "$::breaking_call
+		set leaked \[list]
+		foreach path \[stderr_temp_files] {
+			if {\$path ni \$before} {
+				lappend leaked \$path
+			}
+		}
+		puts \[list \[llength \[array names ::exec_extensions::state]] \[llength \$leaked]]"
+} -result {0 0}
+
 cleanupTests

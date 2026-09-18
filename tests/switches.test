@@ -35,12 +35,8 @@ proc agree {switches args} {
 # What -ignorestderr does with the command's stderr is let it through to the
 # interpreter's own stderr. That is the behaviour under test, and it is also
 # exactly what tcltest counts as a test file error, so those cases run in a
-# child interpreter whose stderr is dropped. The child prints its verdict.
-proc passthrough {script} {
-	set boot "lappend auto_path [list [file dirname $::helpers::dir]]\n"
-	append boot "package require exec_extensions\n"
-	return [exec [info nameofexecutable] << $boot$script 2> /dev/null]
-}
+# child interpreter whose stderr is dropped - in_child, from helpers.tcl. The
+# child prints its verdict.
 
 test switches-1.1 {-keepnewline retains the trailing newline} -body {
 	::exec_extensions::ttlexec -keepnewline 2000 printf "a\n"
@@ -59,11 +55,11 @@ test switches-1.4 {-keepnewline does not disturb a failing command} -body {
 } -result 1
 
 test switches-2.1 {-ignorestderr makes stderr alone harmless} -constraints unix -body {
-	passthrough {puts [::exec_extensions::ttlexec -ignorestderr 2000 sh -c {echo warn >&2; echo out}]}
+	in_child {puts [::exec_extensions::ttlexec -ignorestderr 2000 sh -c {echo warn >&2; echo out}]}
 } -result out
 
 test switches-2.2 {-ignorestderr still reports a non-zero exit} -constraints unix -body {
-	passthrough {
+	in_child {
 		set rc [catch {
 			::exec_extensions::ttlexec -ignorestderr 2000 sh -c {echo out; echo warn >&2; exit 7}
 		} msg opts]
@@ -72,7 +68,7 @@ test switches-2.2 {-ignorestderr still reports a non-zero exit} -constraints uni
 } -result {1 0 CHILDSTATUS}
 
 test switches-2.3 {-ignorestderr agrees with exec} -constraints unix -body {
-	passthrough {
+	in_child {
 		set verdict [list]
 		foreach cmd [list {sh -c {echo out; echo warn >&2}} \
 		                  {sh -c {echo out; echo warn >&2; exit 7}}] {
@@ -85,7 +81,7 @@ test switches-2.3 {-ignorestderr agrees with exec} -constraints unix -body {
 } -result {1 1}
 
 test switches-3.1 {both switches at once agree with exec} -constraints unix -body {
-	passthrough {
+	in_child {
 		set cmd {sh -c {echo out; echo warn >&2}}
 		set a [list [catch {exec -keepnewline -ignorestderr {*}$cmd} m] $m]
 		set b [list [catch {::exec_extensions::ttlexec -keepnewline -ignorestderr 2000 {*}$cmd} m] $m]

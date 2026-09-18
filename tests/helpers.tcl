@@ -13,6 +13,21 @@ namespace eval ::helpers {
 lappend auto_path [file dirname $::helpers::dir]
 package require exec_extensions
 
+# Run a script in a fresh interpreter that has the package loaded, and return
+# what it printed on standard output.
+#
+# Its standard error is dropped, which is the point of running it apart: cases
+# that exercise -ignorestderr let the command's stderr through, and a case that
+# provokes a background error writes a stack trace there. tcltest counts
+# anything a test file writes to stderr as a test file error, which would make
+# the whole run come back non-zero with every case still passing. Needs a
+# /dev/null, hence the unix constraint on the cases that use it.
+proc in_child {script} {
+	set boot "lappend auto_path [list [file dirname $::helpers::dir]]\n"
+	append boot "package require exec_extensions\n"
+	return [exec [info nameofexecutable] << $boot$script 2> /dev/null]
+}
+
 # Return the pids of the probe processes started with the given sleep duration.
 #
 # The duration is what makes a probe unique. The suite has to ask the process

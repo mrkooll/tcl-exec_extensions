@@ -126,7 +126,16 @@ proc ::exec_extensions::_collect {token} {
 	variable state
 	set chan $state($token,chan)
 	# read (not gets) so that empty lines and a missing final newline survive.
-	append state($token,result) [read $chan]
+	# A failing read has to be turned into an ending like any other: an error
+	# raised inside a file event goes to the background handler, and the vwait
+	# in ttlexec would then wait for a wake-up that nothing is left to give it.
+	if {[catch {read $chan} chunk]} {
+		set state($token,error) $chunk
+		set state($token,errorcode) $::errorCode
+		_finish $token
+		return
+	}
+	append state($token,result) $chunk
 	if {[eof $chan]} {
 		_finish $token
 	}
@@ -173,7 +182,9 @@ proc ::exec_extensions::_finish {token} {
 	}
 	after cancel $state($token,timer)
 	catch {fconfigure $chan -blocking 1}
-	if {[catch {close $chan} msg]} {
+	# A reason recorded before this point - a read that failed - is the root one,
+	# and close is only going to report the wreckage it left.
+	if {[catch {close $chan} msg] && ($state($token,error) eq "")} {
 		set state($token,error) $msg
 		set state($token,errorcode) $::errorCode
 	}
