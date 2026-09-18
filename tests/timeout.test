@@ -31,6 +31,18 @@ test timeout-1.2 {the call returns on the limit, not when the child would end} -
 	reap_probe 27180
 } -result 1
 
+test timeout-1.3 {the limit leads the message, not the kill enforcing it} -setup {
+	reap_probe 29450
+} -body {
+	# Terminating the wrapper makes the shell report the job on stderr. That
+	# text is captured like any other, but it is this package talking, so it
+	# must not take the place of the reason the call failed.
+	catch {::exec_extensions::ttlexec 500 sh -c {sleep 29450; :}} msg
+	string match {child process * did not finish within 500ms*} $msg
+} -cleanup {
+	reap_probe 29450
+} -result 1
+
 test timeout-2.1 {an expired child is terminated, not orphaned} -constraints unix -setup {
 	reap_probe 27180
 } -body {

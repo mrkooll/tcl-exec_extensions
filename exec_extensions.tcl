@@ -272,13 +272,21 @@ proc ::exec_extensions::ttlexec {args} {
 	}
 	catch {file delete -- $errfile}
 	set stderr_text [string trimright $stderr_text "\n"]
-	if {($message ne "") || ($stderr_text ne "")} {
-		if {$stderr_text ne ""} {
-			if {$message ne ""} {
-				append stderr_text "\n" $message
-			}
-			set message $stderr_text
+	if {($message ne "") && ($stderr_text ne "")} {
+		# exec leads with the child's own words and ends with its status line.
+		# The timeout case is the other way round: the limit is the reason, and
+		# the stderr under it starts with a shell announcing the job this
+		# package has just killed - noise of our own making, which must not
+		# stand where the reason belongs.
+		if {[lrange $code 0 1] eq {PIPE ETIMEOUT}} {
+			append message "\n" $stderr_text
+		} else {
+			set message "$stderr_text\n$message"
 		}
+	} elseif {$stderr_text ne ""} {
+		set message $stderr_text
+	}
+	if {$message ne ""} {
 		if {$code eq {}} {
 			set code NONE
 		}
