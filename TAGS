@@ -1,14 +1,21 @@
 
-exec_extensions.tcl,724
-proc ::exec_extensions::_token::exec_extensions::_token35,1388
-proc ::exec_extensions::_process_table::exec_extensions::_process_table46,1825
-proc ::exec_extensions::_descendants::exec_extensions::_descendants69,2639
-proc ::exec_extensions::terminate::exec_extensions::terminate114,4027
-proc ::exec_extensions::_collect::exec_extensions::_collect164,5480
-proc ::exec_extensions::_alive::exec_extensions::_alive190,6487
-proc ::exec_extensions::_finish::exec_extensions::_finish204,6814
-proc ::exec_extensions::_expire::exec_extensions::_expire235,8205
-proc ::exec_extensions::_redirects_stderr::exec_extensions::_redirects_stderr263,9429
-proc ::exec_extensions::ttlexec::exec_extensions::ttlexec300,11050
+exec_extensions.tcl,1301
+proc ::exec_extensions::_token::exec_extensions::_token44,1848
+proc ::exec_extensions::_proc_stat::exec_extensions::_proc_stat58,2554
+proc ::exec_extensions::_probe::exec_extensions::_probe83,3377
+proc ::exec_extensions::_process_table::exec_extensions::_process_table115,4614
+proc ::exec_extensions::_process_table_proc::exec_extensions::_process_table_proc128,4823
+proc ::exec_extensions::_process_table_ps::exec_extensions::_process_table_ps142,5185
+proc ::exec_extensions::_descendants::exec_extensions::_descendants165,6002
+proc ::exec_extensions::terminate::exec_extensions::terminate210,7300
+proc ::exec_extensions::_signalable::exec_extensions::_signalable231,7693
+proc ::exec_extensions::_terminate_taskkill::exec_extensions::_terminate_taskkill248,8331
+proc ::exec_extensions::_terminate_kill::exec_extensions::_terminate_kill273,9133
+proc ::exec_extensions::_collect::exec_extensions::_collect311,10402
+proc ::exec_extensions::_alive::exec_extensions::_alive337,11409
+proc ::exec_extensions::_finish::exec_extensions::_finish370,12205
+proc ::exec_extensions::_expire::exec_extensions::_expire401,13596
+proc ::exec_extensions::_redirects_stderr::exec_extensions::_redirects_stderr429,14820
+proc ::exec_extensions::ttlexec::exec_extensions::ttlexec466,16441
 
 pkgIndex.tcl,0

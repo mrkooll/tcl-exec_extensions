@@ -92,40 +92,54 @@ tells the two apart.
 Tcl 8.6, which the package asks for itself and will refuse to load without:
 `file tempfile`, used to capture standard error, arrived in that release.
 
-Beyond Tcl, two external commands:
+Stopping a process and looking at one are not things Tcl can do on its own, so
+the package borrows them from the system. Which way it borrows them is decided
+once, as the package loads, by trying each candidate rather than by reading the
+platform's name - a helper that answers correctly then will answer correctly
+later, and one that is missing or speaks another dialect is passed over there
+and then instead of failing in the middle of a timeout.
 
-* a `ps` that understands `ps -Ao pid=,ppid=,lstart=` and `ps -o stat= -p <pid>`
-  (Linux and macOS do), for the descendant walk, for telling a reused pid from
-  the process that held it, and for the liveness check described below;
-* a `kill` that takes `-TERM`, `-KILL` and a pid.
+The outcome is left in two variables, for reading and, if need be, for forcing:
+
+```tcl
+puts $::exec_extensions::signaller   ;# kill | taskkill | none
+puts $::exec_extensions::inspector   ;# proc | ps | tasklist | none
+```
+
+| | how it is found | what it gives |
+|---|---|---|
+| `kill` | `kill -0 <own pid>` succeeds | `SIGTERM`, then `SIGKILL`, over a subtree found by the inspector |
+| `taskkill` | Windows, and `taskkill` on the path | `taskkill /PID <pid> /T`, then the same with `/F`; the system resolves the tree itself |
+| `proc` | `/proc/<own pid>/stat` parses | parent and start time in clock ticks, and the run state, with nothing to fork |
+| `ps` | `ps -Ao pid=,ppid=,lstart=` runs | the same, from `ps`, with the start time to the second |
+| `tasklist` | Windows, and `tasklist` on the path | whether a pid is still running; no parent, which `taskkill /T` does not need |
+
+`proc` is preferred over `ps` where both are there: it is a file to read rather
+than a process to start, and its start time is precise to a clock tick instead
+of to a second.
+
+Either can come out `none`, which is a documented state and not an error. With
+no signaller, `terminate` returns without doing anything and an expired command
+is not stopped - its pipe is closed and it keeps running. With no inspector, no
+descendants are found, a reused pid cannot be told from the process that held
+it, and the liveness check answers "finished" for everything, which costs the
+limit its hold on one kind of command: one that closes or redirects its own
+standard output and then keeps running is waited for to the end, however long
+that takes. Commands that hold their standard output open - almost all of them -
+still expire on time.
 
 ### Windows
 
-The package is developed and tested on Unix. It is not tested on Windows, and
-from what the code does there, three things follow - none of which announce
-themselves, because every one of these calls is made inside a `catch`:
-
-* There is no `kill`, so `terminate` signals nothing at all. An expired command
-  is **not** stopped: its pipe is closed and the process keeps running. Over a
-  long-lived process that calls `ttlexec` on a schedule, one leaked process per
-  expiry adds up.
-* There is no `ps`, so no descendants are found and no pid is checked against
-  the process that held it - moot while nothing is signalled anyway.
-* Without `ps` the liveness check also answers "finished" for everything, and
-  the limit stops being enforced in one case: a command that closes or
-  redirects its own standard output and then keeps running is waited for until
-  it ends, however long that takes. Commands that hold their standard output
-  open - almost all of them - still expire on time.
-
-Making this work would mean `taskkill /T /F` in place of the signals and
-something other than `ps` for the process table. Patches welcome; guesses about
-an untested platform do not belong in the code.
+The Windows paths are written but **not tested**: no Windows was to hand. They
+are reached only where `taskkill` and `tasklist` really are, so they cannot
+disturb a Unix, and on Windows they can only improve on what came before them,
+which was nothing at all. Reports welcome.
 
 ## Tests
 
 The suite uses `tcltest`, which ships with Tcl, and is grouped by theme in
-`tests/`: `loading`, `output`, `switches`, `redirect`, `errors`, `timeout`,
-`terminate`, `cleanup`.
+`tests/`: `loading`, `platform`, `output`, `switches`, `redirect`, `errors`,
+`timeout`, `terminate`, `cleanup`.
 
 ```sh
 tclsh tests/all.tcl                    # everything
@@ -137,6 +151,18 @@ tclsh tests/all.tcl -verbose pbst      # show passing cases as well
 The runner exits non-zero when anything failed. Each file also runs on its own
 (`tclsh tests/timeout.test`). The cases that look for surviving processes are
 constrained to Unix, and read the process table with `ps`.
+
+## Changes in 2.1
+
+* How to stop a process and how to look at one are settled once, as the package
+  loads, by trying what the system offers instead of calling `kill` and `ps` and
+  hoping. The choice is readable in `$::exec_extensions::signaller` and
+  `$::exec_extensions::inspector`, and either can be forced.
+* Windows gets `taskkill` and `tasklist`, where before it silently got nothing -
+  written but untested, see above.
+* A Linux gets `/proc`, which starts no process to read and dates one to a clock
+  tick rather than to a second. On a system that has it, the liveness check
+  behind the time limit stops costing a `fork` per call.
 
 ## Changes in 2.0
 

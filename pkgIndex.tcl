@@ -8,7 +8,7 @@
 # script is sourced, the variable $dir must contain the
 # full path name of this file's directory.
 
-package ifneeded exec_extensions 2.0 [list source [file join $dir exec_extensions.tcl]]
+package ifneeded exec_extensions 2.1 [list source [file join $dir exec_extensions.tcl]]
 
 # Local Variables:
 # mode: tcl

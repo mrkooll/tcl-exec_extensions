@@ -10,12 +10,21 @@
 package require Tcl 8.6
 
 namespace eval ::exec_extensions {
-	variable version 2.0
+	variable version 2.1
 	# Milliseconds between SIGTERM and SIGKILL when a child outlives its limit.
 	variable kill_grace 200
 	# Milliseconds between checks for a child that stopped writing but has not
 	# exited yet. Only the pathological case waits at all - see _finish.
 	variable poll_interval 50
+	# How this system lets us stop processes and look at them. Both are settled
+	# once, by _probe, and both may be set by hand to force a particular path.
+	#   signaller: kill | taskkill | none
+	#   inspector: proc | ps | tasklist | none
+	variable signaller ""
+	variable inspector ""
+	# Root of the process filesystem the "proc" inspector reads. A variable so
+	# that its parsing can be exercised on a system that has no /proc of its own.
+	variable procfs /proc
 	# Serial number feeding the per-call state key.
 	variable serial 0
 	# Per-call state, keyed "<token>,<field>".
@@ -37,13 +46,100 @@ proc ::exec_extensions::_token {} {
 	return "[pid]_[incr serial]"
 }
 
+# ::exec_extensions::_proc_stat -- the fields after comm in /proc/<pid>/stat (internal)
+#
+# Field 3 of that line is the run state and field 22 the start time in clock
+# ticks since boot; both arrive in one read, with nothing to fork and with a
+# resolution no date printed to the second can match. Field 2 is the command
+# name in brackets and may itself hold spaces and brackets, so the count starts
+# again after the last closing one. Returns the fields from 3 onwards, so state
+# is index 0, ppid is index 1 and the start time is index 19 - or the empty
+# string when there is no such process, or no such filesystem.
+proc ::exec_extensions::_proc_stat {pid} {
+	variable procfs
+	set fh ""
+	if {[catch {
+		set fh [open [file join $procfs $pid stat] r]
+		read $fh
+	} data]} {
+		catch {close $fh}
+		return ""
+	}
+	close $fh
+	set end [string last ")" $data]
+	if {$end < 0} {
+		return ""
+	}
+	return [regexp -all -inline {\S+} [string range $data $end+1 end]]
+}
+
+# ::exec_extensions::_probe -- settle how to stop processes and look at them (internal)
+#
+# Asked once, as the package loads. Every candidate is tried rather than guessed
+# at from the platform's name: a helper that answers correctly here will answer
+# correctly later, and one that is absent or speaks another dialect is passed
+# over now instead of failing in the middle of a timeout. What stays unanswered
+# becomes "none", a documented state rather than an error - see the README.
+proc ::exec_extensions::_probe {} {
+	variable signaller
+	variable inspector
+	set windows [expr {$::tcl_platform(platform) eq "windows"}]
+	set signaller none
+	if {!$windows && [llength [auto_execok kill]]} {
+		# Signal 0 asks the kernel about this very process and changes nothing,
+		# so it tells us the helper is there and takes the arguments we mean.
+		if {![catch {exec kill -0 [pid]}]} {
+			set signaller kill
+		}
+	} elseif {$windows && [llength [auto_execok taskkill]]} {
+		set signaller taskkill
+	}
+	set inspector none
+	if {[llength [_proc_stat [pid]]] > 19} {
+		set inspector proc
+	} elseif {![catch {exec ps -Ao pid=,ppid=,lstart=}]} {
+		set inspector ps
+	} elseif {$windows && [llength [auto_execok tasklist]]} {
+		set inspector tasklist
+	}
+	return
+}
+
 # ::exec_extensions::_process_table -- every process as pid -> {ppid start} (internal)
 #
 # The start time is what tells one process from another once a pid is reused:
 # pids come round again, but the process holding a recycled one started later.
-# A process table we cannot read gives an empty one, and the callers fall back
-# on what they were told.
+# An empty table means nothing here can enumerate processes, and the callers
+# fall back on what they were told. tasklist is in that group: it does not
+# report a parent, and the Windows way of stopping a tree has no use for one.
 proc ::exec_extensions::_process_table {} {
+	variable inspector
+	switch -exact -- $inspector {
+		proc {
+			return [_process_table_proc]
+		}
+		ps {
+			return [_process_table_ps]
+		}
+	}
+	return [dict create]
+}
+
+proc ::exec_extensions::_process_table_proc {} {
+	variable procfs
+	set table [dict create]
+	foreach path [glob -nocomplain -directory $procfs -types d -- {[0-9]*}] {
+		set pid [file tail $path]
+		set fields [_proc_stat $pid]
+		if {[llength $fields] < 20} {
+			continue
+		}
+		dict set table $pid [list [lindex $fields 1] [lindex $fields 19]]
+	}
+	return $table
+}
+
+proc ::exec_extensions::_process_table_ps {} {
 	set table [dict create]
 	if {[catch {exec ps -Ao pid=,ppid=,lstart=} listing]} {
 		return $table
@@ -94,17 +190,17 @@ proc ::exec_extensions::_descendants {pids table} {
 # ::exec_extensions::terminate -- stop a set of processes and their children (public)
 # terminate pids ?grace?
 #
-# Send SIGTERM to every pid and to every process descended from it, wait grace
-# milliseconds, then send SIGKILL to those of them that are still the same
-# processes - a pid freed during the wait can already belong to somebody else,
-# and only the start time tells the two apart. Signalling a process that already
-# exited is a harmless no-op, and the exec calls themselves make Tcl reap its
-# detached children. This process is never signalled, so a caller that passes
-# its own pid by accident cannot kill the interpreter.
+# Ask the processes to stop, wait grace milliseconds, then insist. Which helper
+# does the asking was settled by _probe when the package loaded: kill and a
+# walked subtree on a Unix, taskkill and its own /T on Windows, and on a system
+# that offers neither, nothing at all - see the README. This process is never
+# signalled, so a caller that passes its own pid by accident cannot kill the
+# interpreter.
 #
 # Arguments:
 # pids   - list of process IDs
-# ?grace - milliseconds to wait before SIGKILL (default $::exec_extensions::kill_grace)
+# ?grace - milliseconds to wait before the second, forceful pass
+#          (default $::exec_extensions::kill_grace)
 #
 # Side Effects:
 # Signals the processes. Blocks for grace milliseconds when pids is not empty.
@@ -119,13 +215,64 @@ proc ::exec_extensions::terminate {pids {grace ""}} {
 		variable kill_grace
 		set grace $kill_grace
 	}
-	set table [_process_table]
-	set targets [list]
-	foreach pid [_descendants $pids $table] {
-		if {($pid != [pid]) && ($pid > 1)} {
-			lappend targets $pid
+	variable signaller
+	switch -exact -- $signaller {
+		kill {
+			_terminate_kill $pids $grace
+		}
+		taskkill {
+			_terminate_taskkill $pids $grace
 		}
 	}
+	return
+}
+
+# ::exec_extensions::_signalable -- pids worth signalling (internal)
+proc ::exec_extensions::_signalable {pids} {
+	set out [list]
+	foreach pid $pids {
+		if {[string is integer -strict $pid] && ($pid != [pid]) && ($pid > 1)} {
+			lappend out $pid
+		}
+	}
+	return $out
+}
+
+# ::exec_extensions::_terminate_taskkill -- stop a tree on Windows (internal)
+#
+# /T takes the whole tree with it, so there is no subtree to walk here and no
+# pid of our own finding to check against a reused one: the system resolves the
+# tree itself, at the moment of the call. The first pass asks, the second, with
+# /F, insists. Untested - no Windows was to hand - but it can only improve on
+# what came before it, which was nothing.
+proc ::exec_extensions::_terminate_taskkill {pids grace} {
+	set targets [_signalable $pids]
+	if {![llength $targets]} {
+		return
+	}
+	foreach pid $targets {
+		catch {exec taskkill /PID $pid /T}
+	}
+	if {$grace > 0} {
+		after $grace
+	}
+	foreach pid $targets {
+		catch {exec taskkill /PID $pid /T /F}
+	}
+	return
+}
+
+# ::exec_extensions::_terminate_kill -- stop a tree with signals (internal)
+#
+# Send SIGTERM to every pid and to every process descended from it, wait grace
+# milliseconds, then send SIGKILL to those of them that are still the same
+# processes - a pid freed during the wait can already belong to somebody else,
+# and only the start time tells the two apart. Signalling a process that already
+# exited is a harmless no-op, and the exec calls themselves make Tcl reap its
+# detached children.
+proc ::exec_extensions::_terminate_kill {pids grace} {
+	set table [_process_table]
+	set targets [_signalable [_descendants $pids $table]]
 	if {![llength $targets]} {
 		return
 	}
@@ -188,13 +335,32 @@ proc ::exec_extensions::_collect {token} {
 # than from a signal. A process table we cannot read reports everything as
 # finished, which is what the caller got before this check existed.
 proc ::exec_extensions::_alive {pids} {
+	variable inspector
 	foreach pid $pids {
-		if {[catch {exec ps -o stat= -p $pid} stat]} {
-			continue
-		}
-		set stat [string trim $stat]
-		if {($stat ne "") && ([string index $stat 0] ne "Z")} {
-			return 1
+		switch -exact -- $inspector {
+			proc {
+				set fields [_proc_stat $pid]
+				if {[llength $fields] && ([lindex $fields 0] ne "Z")} {
+					return 1
+				}
+			}
+			ps {
+				if {[catch {exec ps -o stat= -p $pid} stat]} {
+					continue
+				}
+				set stat [string trim $stat]
+				if {($stat ne "") && ([string index $stat 0] ne "Z")} {
+					return 1
+				}
+			}
+			tasklist {
+				# Windows keeps no zombie to tell apart: a process that has
+				# ended is simply not listed any more.
+				if {![catch {exec tasklist /FI "PID eq $pid" /NH} listing] \
+				    && [string match "*$pid*" $listing]} {
+					return 1
+				}
+			}
 		}
 	}
 	return 0
@@ -438,6 +604,10 @@ proc ::exec_extensions::ttlexec {args} {
 # Keep the pre-1.1 spelling working: the command used to live in the global
 # namespace, so scripts written against 1.0 call it unqualified.
 interp alias {} ::ttlexec {} ::exec_extensions::ttlexec
+
+# Find out what this system gives us, once, here, rather than on the first
+# timeout - by which point a wrong answer costs a leaked process.
+::exec_extensions::_probe
 
 # Local Variables:
 # mode: tcl

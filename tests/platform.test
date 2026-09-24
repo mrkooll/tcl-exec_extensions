@@ -1,0 +1,149 @@
+# What the package decided this system can do, and what each of those paths
+# does when it is taken. The proc inspector is exercised against a handmade
+# filesystem: there is no /proc here, and its parsing is the part most likely
+# to be got wrong.
+
+package require tcltest 2.5
+namespace import -force ::tcltest::*
+source [file join [file dirname [info script]] helpers.tcl]
+
+# One line of /proc/<pid>/stat: pid, comm in brackets, then the fields the
+# package counts on - state at 3, ppid at 4, start time at 22.
+proc stat_line {pid comm state ppid start} {
+	set fields [list $state $ppid]
+	# Fields 5 through 21, whose values this package never looks at.
+	for {set i 0} {$i < 17} {incr i} {
+		lappend fields 0
+	}
+	lappend fields $start
+	return "$pid ($comm) [join $fields { }]\n"
+}
+proc fake_procfs {entries} {
+	set root [makeDirectory fake_proc]
+	foreach {pid line} $entries {
+		file mkdir [file join $root $pid]
+		set fh [open [file join $root $pid stat] w]
+		puts -nonewline $fh $line
+		close $fh
+	}
+	return $root
+}
+
+test platform-1.1 {this system was probed for a signaller and an inspector} -body {
+	list [expr {$::exec_extensions::signaller in {kill taskkill none}}] \
+	  [expr {$::exec_extensions::inspector in {proc ps tasklist none}}]
+} -result {1 1}
+
+test platform-1.2 {a unix with kill and ps is read as such} -constraints unix -body {
+	list $::exec_extensions::signaller $::exec_extensions::inspector
+} -result {kill ps}
+
+test platform-2.1 {a stat line is split after the command name} -setup {
+	set saved $::exec_extensions::procfs
+	set ::exec_extensions::procfs [fake_procfs \
+	  [list 4242 [stat_line 4242 "my (odd) prog" S 42 987654]]]
+} -body {
+	# The command name holds both spaces and brackets, which is exactly what
+	# counting fields from the left would trip over.
+	set fields [::exec_extensions::_proc_stat 4242]
+	list [lindex $fields 0] [lindex $fields 1] [lindex $fields 19]
+} -cleanup {
+	set ::exec_extensions::procfs $saved
+	removeDirectory fake_proc
+} -result {S 42 987654}
+
+test platform-2.2 {a pid with no stat file reads as nothing} -setup {
+	set saved $::exec_extensions::procfs
+	set ::exec_extensions::procfs [fake_procfs {}]
+} -body {
+	::exec_extensions::_proc_stat 4242
+} -cleanup {
+	set ::exec_extensions::procfs $saved
+	removeDirectory fake_proc
+} -result {}
+
+test platform-2.3 {the proc inspector builds the table and reads liveness} -setup {
+	set saved_fs $::exec_extensions::procfs
+	set saved_in $::exec_extensions::inspector
+	set ::exec_extensions::procfs [fake_procfs [list \
+	  11 [stat_line 11 init S 1 100] \
+	  12 [stat_line 12 worker R 11 200] \
+	  13 [stat_line 13 gone Z 12 300]]]
+	set ::exec_extensions::inspector proc
+} -body {
+	set table [::exec_extensions::_process_table]
+	list [dict size $table] \
+	  [dict get $table 12] \
+	  [::exec_extensions::_alive 12] \
+	  [::exec_extensions::_alive 13] \
+	  [::exec_extensions::_alive 99]
+} -cleanup {
+	set ::exec_extensions::procfs $saved_fs
+	set ::exec_extensions::inspector $saved_in
+	removeDirectory fake_proc
+} -result {3 {11 200} 1 0 0}
+
+test platform-2.4 {the proc inspector finds descendants through the table} -setup {
+	set saved_fs $::exec_extensions::procfs
+	set saved_in $::exec_extensions::inspector
+	set ::exec_extensions::procfs [fake_procfs [list \
+	  11 [stat_line 11 root S 1 100] \
+	  12 [stat_line 12 child S 11 200] \
+	  13 [stat_line 13 grandchild S 12 300] \
+	  14 [stat_line 14 stranger S 1 400]]]
+	set ::exec_extensions::inspector proc
+} -body {
+	lsort -integer [::exec_extensions::_descendants 11 \
+	  [::exec_extensions::_process_table]]
+} -cleanup {
+	set ::exec_extensions::procfs $saved_fs
+	set ::exec_extensions::inspector $saved_in
+	removeDirectory fake_proc
+} -result {11 12 13}
+
+test platform-3.1 {with no inspector there is no table and nothing looks alive} -setup {
+	set saved $::exec_extensions::inspector
+	set ::exec_extensions::inspector none
+} -body {
+	list [dict size [::exec_extensions::_process_table]] \
+	  [::exec_extensions::_alive [pid]]
+} -cleanup {
+	set ::exec_extensions::inspector $saved
+} -result {0 0}
+
+test platform-3.2 {with no signaller nothing is signalled} -constraints unix -setup {
+	reap_probe 19310
+} -body {
+	# The documented Windows state, reached here on purpose: terminate must
+	# return quietly and leave the process alone rather than raise.
+	set chan [open |[list sleep 19310] r]
+	set saved $::exec_extensions::signaller
+	set ::exec_extensions::signaller none
+	::exec_extensions::terminate [pid $chan] 0
+	set ::exec_extensions::signaller $saved
+	set survived [llength [probe_pids 19310]]
+	::exec_extensions::terminate [pid $chan] 0
+	catch {fconfigure $chan -blocking 0; close $chan}
+	after 300
+	list $survived [llength [probe_pids 19310]]
+} -cleanup {
+	reap_probe 19310
+} -result {1 0}
+
+test platform-3.3 {a forced signaller decides which helper is called} -constraints unix -body {
+	# taskkill is not here, so choosing it must end in nothing happening at all
+	# rather than in a fallback to kill.
+	in_child {
+		set ::called [list]
+		rename exec _real_exec
+		proc exec {args} {
+			lappend ::called [lindex $args 0]
+			return [_real_exec {*}$args]
+		}
+		set ::exec_extensions::signaller taskkill
+		catch {::exec_extensions::terminate 999999 0}
+		puts [lsort -unique $::called]
+	}
+} -result taskkill
+
+cleanupTests
