@@ -10,7 +10,7 @@
 package require Tcl 8.6
 
 namespace eval ::exec_extensions {
-	variable version 2.1
+	variable version 2.2
 	# Milliseconds between SIGTERM and SIGKILL when a child outlives its limit.
 	variable kill_grace 200
 	# Milliseconds between checks for a child that stopped writing but has not
@@ -315,9 +315,9 @@ proc ::exec_extensions::_collect {token} {
 	# A failing read has to be turned into an ending like any other: an error
 	# raised inside a file event goes to the background handler, and the vwait
 	# in ttlexec would then wait for a wake-up that nothing is left to give it.
-	if {[catch {read $chan} chunk]} {
+	if {[catch {read $chan} chunk opts]} {
 		set state($token,error) $chunk
-		set state($token,errorcode) $::errorCode
+		set state($token,errorcode) [dict get $opts -errorcode]
 		_finish $token
 		return
 	}
@@ -389,9 +389,9 @@ proc ::exec_extensions::_finish {token} {
 	catch {fconfigure $chan -blocking 1}
 	# A reason recorded before this point - a read that failed - is the root one,
 	# and close is only going to report the wreckage it left.
-	if {[catch {close $chan} msg] && ($state($token,error) eq "")} {
+	if {[catch {close $chan} msg opts] && ($state($token,error) eq "")} {
 		set state($token,error) $msg
-		set state($token,errorcode) $::errorCode
+		set state($token,errorcode) [dict get $opts -errorcode]
 	}
 	set state($token,done) 1
 	return
@@ -518,12 +518,16 @@ proc ::exec_extensions::ttlexec {args} {
 			lappend cmd 2>@$errchan
 		}
 	}
-	if {[catch {open |$cmd r} chan]} {
+	if {[catch {open |$cmd r} chan opts]} {
+		# Hold on to what the open said before tidying up: a catch in there that
+		# caught something would leave its own code behind in ::errorCode, and
+		# the caller would be told the command could not be started with a code
+		# belonging to a failed delete.
 		if {$errchan ne ""} {
 			catch {close $errchan}
 			catch {file delete -- $errfile}
 		}
-		return -code error -errorcode $::errorCode $chan
+		return -options $opts $chan
 	}
 	array set state [list \
 	  $token,chan $chan \

@@ -152,6 +152,14 @@ The runner exits non-zero when anything failed. Each file also runs on its own
 (`tclsh tests/timeout.test`). The cases that look for surviving processes are
 constrained to Unix, and read the process table with `ps`.
 
+## Changes in 2.2
+
+* A command that cannot be started is reported with its own error code again.
+  The tidying up that precedes the report is done in `catch`, and a `catch` that
+  catches something leaves its code behind in `::errorCode`, which was then what
+  the caller got - `NONE` under the right message, where `exec` says
+  `POSIX ENOENT`.
+
 ## Changes in 2.1
 
 * How to stop a process and how to look at one are settled once, as the package

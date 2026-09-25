@@ -39,6 +39,32 @@ test errors-2.1 {a command that cannot be started raises} -body {
 	catch {::exec_extensions::ttlexec 1000 no_such_binary_xyz}
 } -result 1
 
+test errors-2.2 {a failure to start carries the code exec gives it} -constraints unix -body {
+	set rc [catch {::exec_extensions::ttlexec 1000 no_such_binary_xyz} msg opts]
+	catch {exec no_such_binary_xyz} expected_msg expected_opts
+	list $rc \
+	  [string equal $msg $expected_msg] \
+	  [string equal [dict get $opts -errorcode] [dict get $expected_opts -errorcode]]
+} -result {1 1 1}
+
+test errors-2.3 {tidying up after a failed start does not replace that code} -constraints unix -body {
+	# The cleanup runs before the failure is reported, and a catch in it that
+	# caught something would leave its own code behind in ::errorCode - which is
+	# then what the caller would be handed, under the message about the command
+	# that could not be started. Runs apart because it breaks file delete.
+	in_child {
+		rename file _real_file
+		proc file {args} {
+			if {[lindex $args 0] eq "delete"} {
+				error "cleanup failed"
+			}
+			return [_real_file {*}$args]
+		}
+		catch {::exec_extensions::ttlexec 1000 no_such_binary_xyz} msg opts
+		puts [lrange [dict get $opts -errorcode] 0 1]
+	}
+} -result {POSIX ENOENT}
+
 test errors-3.1 {a missing command word is rejected} -body {
 	catch {::exec_extensions::ttlexec 100}
 } -result 1
